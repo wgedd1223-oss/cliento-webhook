@@ -1,8 +1,10 @@
 const express = require("express");
 const admin = require("firebase-admin");
+const twilio = require("twilio");
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 // ── FIREBASE INIT ─────────────────────────────────────────────────────────────
 const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
@@ -17,11 +19,16 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-const VERIFY_TOKEN = "cliento_webhook_2025";
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+// ── TWILIO INIT ───────────────────────────────────────────────────────────────
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
 
-// ── WEBHOOK VERIFICATION ──────────────────────────────────────────────────────
+const VERIFY_TOKEN = "cliento_webhook_2025";
+
+// ── WEBHOOK VERIFICATION (Meta) ───────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -34,32 +41,21 @@ app.get("/webhook", (req, res) => {
   return res.status(403).send("Forbidden");
 });
 
-// ── RECEIVE MESSAGES ─────────────────────────────────────────────────────────
-app.post("/webhook", async (req, res) => {
-  res.status(200).send("OK"); // Responder rápido a Meta
+// ── RECEIVE MESSAGES FROM TWILIO ──────────────────────────────────────────────
+app.post("/twilio/webhook", async (req, res) => {
+  res.status(200).send("OK");
 
   try {
-    const body = req.body;
-    if (body.object !== "whatsapp_business_account") return;
+    const from = req.body.From?.replace("whatsapp:", ""); // ej: +18094868822
+    const text = req.body.Body || "";
+    const contactName = req.body.ProfileName || "Cliente";
+    const timestamp = new Date();
 
-    const entry = body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const messages = value?.messages;
-    const contacts = value?.contacts;
-
-    if (!messages || messages.length === 0) return;
-
-    const message = messages[0];
-    const from = message.from; // número del cliente ej: 18094868822
-    const text = message.text?.body || "";
-    const timestamp = new Date(parseInt(message.timestamp) * 1000);
-    const contactName = contacts?.[0]?.profile?.name || "Cliente";
-    const messageId = message.id;
+    if (!from || !text) return;
 
     console.log(`📩 Mensaje de ${from} (${contactName}): ${text}`);
 
-    // ── Buscar workspace por número de teléfono ───────────────────────────────
+    // ── Buscar workspace con Twilio conectado ─────────────────────────────────
     const workspacesSnap = await db.collection("workspaces")
       .where("isWhatsappConnected", "==", true)
       .get();
@@ -77,12 +73,14 @@ app.post("/webhook", async (req, res) => {
       .doc(workspaceId)
       .collection("customers");
 
+    const cleanPhone = from.replace("+", "");
     const customerSnap = await customersRef
-      .where("phone", "==", from)
+      .where("phone", "in", [from, cleanPhone])
       .limit(1)
       .get();
 
     let customerId;
+    let isNewCustomer = false;
 
     if (customerSnap.empty) {
       // Crear nuevo cliente
@@ -98,9 +96,9 @@ app.post("/webhook", async (req, res) => {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       customerId = newCustomer.id;
+      isNewCustomer = true;
       console.log(`✅ Nuevo cliente creado: ${contactName} (${from})`);
     } else {
-      // Actualizar cliente existente
       const customerDoc = customerSnap.docs[0];
       customerId = customerDoc.id;
       const currentUnread = customerDoc.data().unreadCount || 0;
@@ -114,72 +112,36 @@ app.post("/webhook", async (req, res) => {
       console.log(`✅ Cliente actualizado: ${contactName}`);
     }
 
-    // ── Guardar mensaje ───────────────────────────────────────────────────────
-    const messagesRef = db.collection("workspaces")
+    // ── Guardar mensaje en Firebase ───────────────────────────────────────────
+    await db.collection("workspaces")
       .doc(workspaceId)
-      .collection("messages");
+      .collection("messages")
+      .add({
+        workspaceId,
+        customerId,
+        text,
+        sender: "client",
+        timestamp: admin.firestore.Timestamp.fromDate(timestamp),
+        isRead: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
 
-    // Verificar que no sea duplicado
-    const existingMsg = await messagesRef
-      .where("whatsappMessageId", "==", messageId)
-      .limit(1)
-      .get();
+    console.log(`✅ Mensaje guardado en Firebase`);
 
-    if (!existingMsg.empty) {
-      console.log("⚠️ Mensaje duplicado, ignorando");
-      return;
-    }
-
-    await messagesRef.add({
-      workspaceId,
-      customerId,
-      text,
-      sender: "client",
-      whatsappMessageId: messageId,
-      timestamp: admin.firestore.Timestamp.fromDate(timestamp),
-      isRead: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    console.log(`✅ Mensaje guardado en Firebase: "${text}"`);
-
-    // ── Menú de bienvenida (solo para nuevos clientes) ────────────────────────
-    if (customerSnap.empty && WHATSAPP_TOKEN && PHONE_NUMBER_ID) {
-      await sendWelcomeMessage(from, contactName);
+    // ── Mensaje de bienvenida para nuevos clientes ────────────────────────────
+    if (isNewCustomer && TWILIO_WHATSAPP_NUMBER) {
+      await twilioClient.messages.create({
+        from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
+        to: `whatsapp:${from}`,
+        body: `👋 Hola ${contactName}! Gracias por contactarnos. En breve un agente te atenderá.\n\n_Powered by Cliento_ 🚀`,
+      });
+      console.log(`✅ Mensaje de bienvenida enviado a ${from}`);
     }
 
   } catch (error) {
     console.error("❌ Error procesando mensaje:", error);
   }
 });
-
-// ── ENVIAR MENSAJE DE BIENVENIDA ──────────────────────────────────────────────
-async function sendWelcomeMessage(to, name) {
-  try {
-    const response = await fetch(
-      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to,
-          type: "text",
-          text: {
-            body: `👋 Hola ${name}! Gracias por contactarnos. En breve un agente te atenderá.\n\n_Powered by Cliento_ 🚀`,
-          },
-        }),
-      }
-    );
-    const data = await response.json();
-    console.log("✅ Mensaje de bienvenida enviado:", data);
-  } catch (error) {
-    console.error("❌ Error enviando bienvenida:", error);
-  }
-}
 
 // ── ENVIAR MENSAJE DESDE LA APP ───────────────────────────────────────────────
 app.post("/send-message", async (req, res) => {
@@ -190,28 +152,14 @@ app.post("/send-message", async (req, res) => {
       return res.status(400).json({ error: "Faltan parámetros: to, text" });
     }
 
-    // Enviar por WhatsApp API
-    if (WHATSAPP_TOKEN && PHONE_NUMBER_ID) {
-      const response = await fetch(
-        `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            messaging_product: "whatsapp",
-            to,
-            type: "text",
-            text: { body: text },
-          }),
-        }
-      );
-      const data = await response.json();
-      if (data.error) {
-        return res.status(400).json({ error: data.error });
-      }
+    // Enviar por Twilio WhatsApp
+    if (TWILIO_WHATSAPP_NUMBER) {
+      const phone = to.startsWith("+") ? to : `+${to}`;
+      await twilioClient.messages.create({
+        from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
+        to: `whatsapp:${phone}`,
+        body: text,
+      });
     }
 
     // Guardar en Firebase
@@ -248,18 +196,99 @@ app.post("/send-message", async (req, res) => {
   }
 });
 
+// ── WEBHOOK META (mantener por si Meta aprueba) ───────────────────────────────
+app.post("/webhook", async (req, res) => {
+  res.status(200).send("OK");
+
+  try {
+    const body = req.body;
+    if (body.object !== "whatsapp_business_account") return;
+
+    const messages = body.entry?.[0]?.changes?.[0]?.value?.messages;
+    const contacts = body.entry?.[0]?.changes?.[0]?.value?.contacts;
+    if (!messages || messages.length === 0) return;
+
+    const message = messages[0];
+    const from = message.from;
+    const text = message.text?.body || "";
+    const contactName = contacts?.[0]?.profile?.name || "Cliente";
+    const timestamp = new Date(parseInt(message.timestamp) * 1000);
+
+    console.log(`📩 [Meta] Mensaje de ${from}: ${text}`);
+
+    const workspacesSnap = await db.collection("workspaces")
+      .where("isWhatsappConnected", "==", true)
+      .get();
+
+    if (workspacesSnap.empty) return;
+
+    const workspaceId = workspacesSnap.docs[0].id;
+    const customersRef = db.collection("workspaces")
+      .doc(workspaceId)
+      .collection("customers");
+
+    const customerSnap = await customersRef
+      .where("phone", "==", from)
+      .limit(1)
+      .get();
+
+    let customerId;
+
+    if (customerSnap.empty) {
+      const newCustomer = await customersRef.add({
+        workspaceId,
+        name: contactName,
+        phone: from,
+        label: "nuevo",
+        unreadCount: 1,
+        lastMessage: text,
+        lastMessageAt: admin.firestore.Timestamp.fromDate(timestamp),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      customerId = newCustomer.id;
+    } else {
+      customerId = customerSnap.docs[0].id;
+      const currentUnread = customerSnap.docs[0].data().unreadCount || 0;
+      await customersRef.doc(customerId).update({
+        lastMessage: text,
+        lastMessageAt: admin.firestore.Timestamp.fromDate(timestamp),
+        unreadCount: currentUnread + 1,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    await db.collection("workspaces")
+      .doc(workspaceId)
+      .collection("messages")
+      .add({
+        workspaceId,
+        customerId,
+        text,
+        sender: "client",
+        timestamp: admin.firestore.Timestamp.fromDate(timestamp),
+        isRead: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+  } catch (error) {
+    console.error("❌ Error [Meta webhook]:", error);
+  }
+});
+
 // ── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
     status: "running",
     service: "Cliento Webhook",
-    version: "2.0.0",
+    version: "2.1.0",
     firebase: "connected",
+    twilio: "connected",
     timestamp: new Date().toISOString(),
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Cliento Webhook v2.0.0 running on port ${PORT}`);
+  console.log(`🚀 Cliento Webhook v2.1.0 running on port ${PORT}`);
 });
