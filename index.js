@@ -6,15 +6,14 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// ── FIREBASE INIT ─────────────────────────────────────────────────────────────
-const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+// ── FIREBASE INIT con base64 ──────────────────────────────────────────────────
+const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT;
+const serviceAccount = JSON.parse(
+  Buffer.from(serviceAccountBase64, "base64").toString("utf8")
+);
 
 admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: privateKey,
-  }),
+  credential: admin.credential.cert(serviceAccount),
 });
 
 const db = admin.firestore();
@@ -46,7 +45,7 @@ app.post("/twilio/webhook", async (req, res) => {
   res.status(200).send("OK");
 
   try {
-    const from = req.body.From?.replace("whatsapp:", ""); // ej: +18094868822
+    const from = req.body.From?.replace("whatsapp:", "");
     const text = req.body.Body || "";
     const contactName = req.body.ProfileName || "Cliente";
     const timestamp = new Date();
@@ -55,7 +54,7 @@ app.post("/twilio/webhook", async (req, res) => {
 
     console.log(`📩 Mensaje de ${from} (${contactName}): ${text}`);
 
-    // ── Buscar workspace con Twilio conectado ─────────────────────────────────
+    // ── Buscar workspace con WhatsApp conectado ───────────────────────────────
     const workspacesSnap = await db.collection("workspaces")
       .where("isWhatsappConnected", "==", true)
       .get();
@@ -83,7 +82,6 @@ app.post("/twilio/webhook", async (req, res) => {
     let isNewCustomer = false;
 
     if (customerSnap.empty) {
-      // Crear nuevo cliente
       const newCustomer = await customersRef.add({
         workspaceId,
         name: contactName,
@@ -139,7 +137,7 @@ app.post("/twilio/webhook", async (req, res) => {
     }
 
   } catch (error) {
-    console.error("❌ Error procesando mensaje:", error);
+    console.error("❌ Error procesando mensaje:", error.message);
   }
 });
 
@@ -152,7 +150,6 @@ app.post("/send-message", async (req, res) => {
       return res.status(400).json({ error: "Faltan parámetros: to, text" });
     }
 
-    // Enviar por Twilio WhatsApp
     if (TWILIO_WHATSAPP_NUMBER) {
       const phone = to.startsWith("+") ? to : `+${to}`;
       await twilioClient.messages.create({
@@ -162,7 +159,6 @@ app.post("/send-message", async (req, res) => {
       });
     }
 
-    // Guardar en Firebase
     if (workspaceId && customerId) {
       await db.collection("workspaces")
         .doc(workspaceId)
@@ -191,12 +187,12 @@ app.post("/send-message", async (req, res) => {
 
     return res.status(200).json({ success: true });
   } catch (error) {
-    console.error("❌ Error enviando mensaje:", error);
+    console.error("❌ Error enviando mensaje:", error.message);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// ── WEBHOOK META (mantener por si Meta aprueba) ───────────────────────────────
+// ── WEBHOOK META ──────────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   res.status(200).send("OK");
 
@@ -272,7 +268,7 @@ app.post("/webhook", async (req, res) => {
       });
 
   } catch (error) {
-    console.error("❌ Error [Meta webhook]:", error);
+    console.error("❌ Error [Meta webhook]:", error.message);
   }
 });
 
@@ -281,7 +277,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "running",
     service: "Cliento Webhook",
-    version: "2.1.0",
+    version: "2.2.0",
     firebase: "connected",
     twilio: "connected",
     timestamp: new Date().toISOString(),
@@ -290,5 +286,5 @@ app.get("/", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Cliento Webhook v2.1.0 running on port ${PORT}`);
+  console.log(`🚀 Cliento Webhook v2.2.0 running on port ${PORT}`);
 });
