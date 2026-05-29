@@ -144,6 +144,13 @@ app.post("/twilio/webhook", async (req, res) => {
 // ── ENVIAR MENSAJE DESDE LA APP ───────────────────────────────────────────────
 app.post("/send-message", async (req, res) => {
     console.log("📤 Send-message recibido:", JSON.stringify(req.body));
+    console.log("📤 Enviando a Twilio...", `whatsapp:${phone}`);
+const msg = await twilioClient.messages.create({
+  from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
+  to: `whatsapp:${phone}`,
+  body: text,
+});
+console.log("✅ Twilio confirmó envío:", msg.sid);
   try {
     const { to, text, workspaceId, customerId, agentId } = req.body;
 
