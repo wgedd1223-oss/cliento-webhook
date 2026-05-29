@@ -42,7 +42,7 @@ app.get("/webhook", (req, res) => {
 
 // ── RECEIVE MESSAGES FROM TWILIO ──────────────────────────────────────────────
 app.post("/twilio/webhook", async (req, res) => {
-  res.status(200).send("OK");
+  res.type('text/xml').status(200).send('<Response></Response');
 
   try {
     const from = req.body.From?.replace("whatsapp:", "");
