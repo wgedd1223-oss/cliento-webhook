@@ -54,7 +54,6 @@ app.post("/twilio/webhook", async (req, res) => {
 
     console.log(`📩 Mensaje de ${from} (${contactName}): ${text}`);
 
-    // ── Buscar workspace con WhatsApp conectado ───────────────────────────────
     const workspacesSnap = await db.collection("workspaces")
       .where("isWhatsappConnected", "==", true)
       .get();
@@ -67,7 +66,6 @@ app.post("/twilio/webhook", async (req, res) => {
     const workspace = workspacesSnap.docs[0];
     const workspaceId = workspace.id;
 
-    // ── Buscar o crear cliente ────────────────────────────────────────────────
     const customersRef = db.collection("workspaces")
       .doc(workspaceId)
       .collection("customers");
@@ -110,7 +108,6 @@ app.post("/twilio/webhook", async (req, res) => {
       console.log(`✅ Cliente actualizado: ${contactName}`);
     }
 
-    // ── Guardar mensaje en Firebase ───────────────────────────────────────────
     await db.collection("workspaces")
       .doc(workspaceId)
       .collection("messages")
@@ -126,7 +123,6 @@ app.post("/twilio/webhook", async (req, res) => {
 
     console.log(`✅ Mensaje guardado en Firebase`);
 
-    // ── Mensaje de bienvenida para nuevos clientes ────────────────────────────
     if (isNewCustomer && TWILIO_WHATSAPP_NUMBER) {
       await twilioClient.messages.create({
         from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
@@ -143,30 +139,28 @@ app.post("/twilio/webhook", async (req, res) => {
 
 // ── ENVIAR MENSAJE DESDE LA APP ───────────────────────────────────────────────
 app.post("/send-message", async (req, res) => {
-    console.log("📤 Send-message recibido:", JSON.stringify(req.body));
-    console.log("📤 Enviando a Twilio...", `whatsapp:${phone}`);
-const msg = await twilioClient.messages.create({
-  from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
-  to: `whatsapp:${phone}`,
-  body: text,
-});
-console.log("✅ Twilio confirmó envío:", msg.sid);
   try {
     const { to, text, workspaceId, customerId, agentId } = req.body;
+
+    console.log("📤 Send-message recibido:", JSON.stringify(req.body));
 
     if (!to || !text) {
       return res.status(400).json({ error: "Faltan parámetros: to, text" });
     }
 
+    // ── Enviar por Twilio WhatsApp ──────────────────────────────────────────
     if (TWILIO_WHATSAPP_NUMBER) {
       const phone = to.startsWith("+") ? to : `+${to}`;
-      await twilioClient.messages.create({
+      console.log(`📤 Enviando a Twilio... whatsapp:${phone}`);
+      const msg = await twilioClient.messages.create({
         from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
         to: `whatsapp:${phone}`,
         body: text,
       });
+      console.log(`✅ Twilio confirmó envío: ${msg.sid}`);
     }
 
+    // ── Guardar en Firebase ─────────────────────────────────────────────────
     if (workspaceId && customerId) {
       await db.collection("workspaces")
         .doc(workspaceId)
@@ -285,7 +279,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "running",
     service: "Cliento Webhook",
-    version: "2.2.0",
+    version: "2.3.0",
     firebase: "connected",
     twilio: "connected",
     timestamp: new Date().toISOString(),
@@ -294,5 +288,5 @@ app.get("/", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Cliento Webhook v2.2.0 running on port ${PORT}`);
+  console.log(`🚀 Cliento Webhook v2.3.0 running on port ${PORT}`);
 });
