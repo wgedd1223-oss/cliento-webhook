@@ -143,6 +143,7 @@ app.post("/twilio/webhook", async (req, res) => {
 
 // ── ENVIAR MENSAJE DESDE LA APP ───────────────────────────────────────────────
 app.post("/send-message", async (req, res) => {
+    console.log("📤 Send-message recibido:", JSON.stringify(req.body));
   try {
     const { to, text, workspaceId, customerId, agentId } = req.body;
 
