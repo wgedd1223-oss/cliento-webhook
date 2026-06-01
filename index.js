@@ -274,6 +274,64 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ── PAYPAL WEBHOOK ────────────────────────────────────────────────────────────
+app.post("/paypal/webhook", async (req, res) => {
+  res.status(200).send("OK");
+
+  try {
+    const event = req.body;
+    const eventType = event.event_type;
+
+    console.log(`💰 PayPal evento: ${eventType}`);
+
+    // Extraer datos de la suscripción
+    const resource = event.resource;
+    const subscriptionId = resource?.id || resource?.billing_agreement_id;
+    const customId = resource?.custom_id || resource?.subscriber?.custom_id;
+
+    if (!customId) {
+      console.log("⚠️ No hay custom_id en el evento");
+      return;
+    }
+
+    // custom_id formato: workspaceId_planType_userId
+    const parts = customId.split("_");
+    const workspaceId = parts[0];
+    const planType = parts[1];
+
+    if (!workspaceId || !planType) {
+      console.log("⚠️ custom_id inválido:", customId);
+      return;
+    }
+
+    if (eventType === "BILLING.SUBSCRIPTION.ACTIVATED" || 
+        eventType === "PAYMENT.SALE.COMPLETED") {
+      // Activar plan
+      await db.collection("workspaces").doc(workspaceId).update({
+        plan: planType,
+        subscriptionId: subscriptionId || null,
+        subscriptionStatus: "active",
+        planUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.log(`✅ Plan ${planType} activado para workspace ${workspaceId}`);
+
+    } else if (eventType === "BILLING.SUBSCRIPTION.CANCELLED" || 
+              eventType === "BILLING.SUBSCRIPTION.SUSPENDED") {
+      // Desactivar plan
+      await db.collection("workspaces").doc(workspaceId).update({
+        plan: "trial",
+        subscriptionId: null,
+        subscriptionStatus: "cancelled",
+        planUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.log(`⚠️ Plan cancelado para workspace ${workspaceId}`);
+    }
+
+  } catch (error) {
+    console.error("❌ Error en PayPal webhook:", error.message);
+  }
+});
+
 // ── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
