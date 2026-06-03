@@ -54,17 +54,32 @@ app.post("/twilio/webhook", async (req, res) => {
 
     console.log(`📩 Mensaje de ${from} (${contactName}): ${text}`);
 
-    const workspacesSnap = await db.collection("workspaces")
-      .where("isWhatsappConnected", "==", true)
-      .get();
+   const to = req.body.To?.replace("whatsapp:", "");
 
-    if (workspacesSnap.empty) {
-      console.log("⚠️ No hay workspaces con WhatsApp conectado");
-      return;
-    }
+const workspacesSnap = await db.collection("workspaces")
+  .where("twilioNumber", "==", to)
+  .where("isWhatsappConnected", "==", true)
+  .limit(1)
+  .get();
 
-    const workspace = workspacesSnap.docs[0];
-    const workspaceId = workspace.id;
+if (workspacesSnap.empty) {
+  // Fallback: buscar por cualquier workspace conectado
+  const fallbackSnap = await db.collection("workspaces")
+    .where("isWhatsappConnected", "==", true)
+    .limit(1)
+    .get();
+  
+  if (fallbackSnap.empty) {
+    console.log("⚠️ No hay workspaces con WhatsApp conectado");
+    return;
+  }
+  
+  var workspace = fallbackSnap.docs[0];
+} else {
+  var workspace = workspacesSnap.docs[0];
+}
+
+const workspaceId = workspace.id;
 
     const customersRef = db.collection("workspaces")
       .doc(workspaceId)
