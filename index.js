@@ -46,6 +46,7 @@ app.post("/twilio/webhook", async (req, res) => {
 
   try {
     const from = req.body.From?.replace("whatsapp:", "");
+    const to = req.body.To?.replace("whatsapp:", "");
     const text = req.body.Body || "";
     const contactName = req.body.ProfileName || "Cliente";
     const timestamp = new Date();
@@ -54,33 +55,33 @@ app.post("/twilio/webhook", async (req, res) => {
 
     console.log(`📩 Mensaje de ${from} (${contactName}): ${text}`);
 
-   const to = req.body.To?.replace("whatsapp:", "");
+    // ── Buscar workspace por número Twilio ────────────────────────────────────
+    let workspace;
+    const workspacesByNumber = await db.collection("workspaces")
+      .where("twilioNumber", "==", to)
+      .where("isWhatsappConnected", "==", true)
+      .limit(1)
+      .get();
 
-const workspacesSnap = await db.collection("workspaces")
-  .where("twilioNumber", "==", to)
-  .where("isWhatsappConnected", "==", true)
-  .limit(1)
-  .get();
+    if (!workspacesByNumber.empty) {
+      workspace = workspacesByNumber.docs[0];
+    } else {
+      // Fallback: buscar cualquier workspace conectado
+      const fallbackSnap = await db.collection("workspaces")
+        .where("isWhatsappConnected", "==", true)
+        .limit(1)
+        .get();
 
-if (workspacesSnap.empty) {
-  // Fallback: buscar por cualquier workspace conectado
-  const fallbackSnap = await db.collection("workspaces")
-    .where("isWhatsappConnected", "==", true)
-    .limit(1)
-    .get();
-  
-  if (fallbackSnap.empty) {
-    console.log("⚠️ No hay workspaces con WhatsApp conectado");
-    return;
-  }
-  
-  var workspace = fallbackSnap.docs[0];
-} else {
-  var workspace = workspacesSnap.docs[0];
-}
+      if (fallbackSnap.empty) {
+        console.log("⚠️ No hay workspaces con WhatsApp conectado");
+        return;
+      }
+      workspace = fallbackSnap.docs[0];
+    }
 
-const workspaceId = workspace.id;
+    const workspaceId = workspace.id;
 
+    // ── Buscar o crear cliente ────────────────────────────────────────────────
     const customersRef = db.collection("workspaces")
       .doc(workspaceId)
       .collection("customers");
@@ -113,7 +114,6 @@ const workspaceId = workspace.id;
       const customerDoc = customerSnap.docs[0];
       customerId = customerDoc.id;
       const currentUnread = customerDoc.data().unreadCount || 0;
-
       await customersRef.doc(customerId).update({
         lastMessage: text,
         lastMessageAt: admin.firestore.Timestamp.fromDate(timestamp),
@@ -123,6 +123,7 @@ const workspaceId = workspace.id;
       console.log(`✅ Cliente actualizado: ${contactName}`);
     }
 
+    // ── Guardar mensaje en Firebase ───────────────────────────────────────────
     await db.collection("workspaces")
       .doc(workspaceId)
       .collection("messages")
@@ -138,6 +139,7 @@ const workspaceId = workspace.id;
 
     console.log(`✅ Mensaje guardado en Firebase`);
 
+    // ── Mensaje de bienvenida para nuevos clientes ────────────────────────────
     if (isNewCustomer && TWILIO_WHATSAPP_NUMBER) {
       await twilioClient.messages.create({
         from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
@@ -155,7 +157,7 @@ const workspaceId = workspace.id;
 // ── ENVIAR MENSAJE DESDE LA APP ───────────────────────────────────────────────
 app.post("/send-message", async (req, res) => {
   try {
-    const { to, text, workspaceId, customerId, agentId } = req.body;
+    const { to, text, workspaceId } = req.body;
 
     console.log("📤 Send-message recibido:", JSON.stringify(req.body));
 
@@ -163,46 +165,30 @@ app.post("/send-message", async (req, res) => {
       return res.status(400).json({ error: "Faltan parámetros: to, text" });
     }
 
-    // ── Enviar por Twilio WhatsApp ──────────────────────────────────────────
-    if (TWILIO_WHATSAPP_NUMBER) {
+    // ── Obtener número Twilio del workspace ───────────────────────────────────
+    let fromNumber = TWILIO_WHATSAPP_NUMBER;
+    if (workspaceId) {
+      const wsDoc = await db.collection("workspaces").doc(workspaceId).get();
+      if (wsDoc.exists && wsDoc.data().twilioNumber) {
+        fromNumber = wsDoc.data().twilioNumber;
+      }
+    }
+
+    // ── Enviar por Twilio WhatsApp ────────────────────────────────────────────
+    if (fromNumber) {
       const phone = to.startsWith("+") ? to : `+${to}`;
       console.log(`📤 Enviando a Twilio... whatsapp:${phone}`);
       const msg = await twilioClient.messages.create({
-        from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
+        from: `whatsapp:${fromNumber}`,
         to: `whatsapp:${phone}`,
         body: text,
       });
       console.log(`✅ Twilio confirmó envío: ${msg.sid}`);
     }
 
-    // ── Guardar en Firebase ─────────────────────────────────────────────────
-    if (workspaceId && customerId) {
-      await db.collection("workspaces")
-        .doc(workspaceId)
-        .collection("messages")
-        .add({
-          workspaceId,
-          customerId,
-          text,
-          sender: "agent",
-          agentId: agentId || null,
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          isRead: true,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-
-      await db.collection("workspaces")
-        .doc(workspaceId)
-        .collection("customers")
-        .doc(customerId)
-        .update({
-          lastMessage: text,
-          lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-    }
-
+    // Firebase lo guarda la app — no guardamos aquí para evitar duplicados
     return res.status(200).json({ success: true });
+
   } catch (error) {
     console.error("❌ Error enviando mensaje:", error.message);
     return res.status(500).json({ error: error.message });
@@ -299,7 +285,6 @@ app.post("/paypal/webhook", async (req, res) => {
 
     console.log(`💰 PayPal evento: ${eventType}`);
 
-    // Extraer datos de la suscripción
     const resource = event.resource;
     const subscriptionId = resource?.id || resource?.billing_agreement_id;
     const customId = resource?.custom_id || resource?.subscriber?.custom_id;
@@ -309,7 +294,6 @@ app.post("/paypal/webhook", async (req, res) => {
       return;
     }
 
-    // custom_id formato: workspaceId_planType_userId
     const parts = customId.split("_");
     const workspaceId = parts[0];
     const planType = parts[1];
@@ -319,9 +303,8 @@ app.post("/paypal/webhook", async (req, res) => {
       return;
     }
 
-    if (eventType === "BILLING.SUBSCRIPTION.ACTIVATED" || 
+    if (eventType === "BILLING.SUBSCRIPTION.ACTIVATED" ||
         eventType === "PAYMENT.SALE.COMPLETED") {
-      // Activar plan
       await db.collection("workspaces").doc(workspaceId).update({
         plan: planType,
         subscriptionId: subscriptionId || null,
@@ -329,10 +312,8 @@ app.post("/paypal/webhook", async (req, res) => {
         planUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       console.log(`✅ Plan ${planType} activado para workspace ${workspaceId}`);
-
-    } else if (eventType === "BILLING.SUBSCRIPTION.CANCELLED" || 
-              eventType === "BILLING.SUBSCRIPTION.SUSPENDED") {
-      // Desactivar plan
+    } else if (eventType === "BILLING.SUBSCRIPTION.CANCELLED" ||
+               eventType === "BILLING.SUBSCRIPTION.SUSPENDED") {
       await db.collection("workspaces").doc(workspaceId).update({
         plan: "trial",
         subscriptionId: null,
@@ -352,7 +333,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "running",
     service: "Cliento Webhook",
-    version: "2.3.0",
+    version: "2.4.0",
     firebase: "connected",
     twilio: "connected",
     timestamp: new Date().toISOString(),
@@ -361,5 +342,5 @@ app.get("/", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Cliento Webhook v2.3.0 running on port ${PORT}`);
+  console.log(`🚀 Cliento Webhook v2.4.0 running on port ${PORT}`);
 });
